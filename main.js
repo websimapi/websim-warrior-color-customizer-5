@@ -26,7 +26,6 @@ const fragmentShader = `
     uniform float uThresholdOutline;
 
     uniform bool uCleanPixels;
-    uniform float uAmbiguityThreshold;
 
     // Lighting uniforms
     uniform vec3 uLightPos;
@@ -42,41 +41,18 @@ const fragmentShader = `
     const vec3 PALETTE_HAIR    = vec3(1.0, 0.0, 0.0); // Red
     const vec3 PALETTE_OUTLINE = vec3(0.0, 0.0, 0.0); // Black
 
-    struct Classification {
-        int index;
-        float distance;
-    };
-
-    Classification classify_pixel(vec2 uv) {
-        vec4 texColor = texture2D(uTexture, uv);
-        if (texColor.a < 0.5) {
-            return Classification(-1, 10.0);
-        }
-
-        vec3 colors[5];
-        colors[0] = PALETTE_FACE;
-        colors[1] = PALETTE_ARMOUR;
-        colors[2] = PALETTE_TRIM;
-        colors[3] = PALETTE_HAIR;
-        colors[4] = PALETTE_OUTLINE;
-        
-        float min_dist = 10.0;
-        int min_idx = -1;
-
-        for (int i = 0; i < 5; i++) {
-            float d = distance(texColor.rgb, colors[i]);
-            if (d < min_dist) {
-                min_dist = d;
-                min_idx = i;
-            }
-        }
-        return Classification(min_idx, min_dist);
-    }
-
     vec3 LUMINANCE_VECTOR = vec3(0.2126, 0.7152, 0.0722);
 
     float getLuminance(vec3 color) {
         return dot(color, LUMINANCE_VECTOR);
+    }
+
+    // Function to convert RGB to YUV color space
+    vec3 rgb2yuv(vec3 rgb) {
+        float y = dot(rgb, vec3(0.299, 0.587, 0.114));
+        float u = dot(rgb, vec3(-0.14713, -0.28886, 0.436));
+        float v = dot(rgb, vec3(0.615, -0.51499, -0.10001));
+        return vec3(y, u, v);
     }
 
     float getTextureLuminance(vec2 uv) {
@@ -111,39 +87,6 @@ const fragmentShader = `
        
         vec3 finalColor = texColor.rgb;
 
-        Classification center_class = classify_pixel(vUv);
-        int final_idx = center_class.index;
-
-        if (center_class.distance > uAmbiguityThreshold && center_class.index != -1) {
-            // Pixel is ambiguous, check neighbors
-            vec2 onePixel = 1.0 / uResolution;
-            Classification n_class = classify_pixel(vUv + vec2(0.0, onePixel.y));
-            Classification s_class = classify_pixel(vUv - vec2(0.0, onePixel.y));
-            Classification e_class = classify_pixel(vUv + vec2(onePixel.x, 0.0));
-            Classification w_class = classify_pixel(vUv - vec2(onePixel.x, 0.0));
-            
-            int votes[5];
-            votes[0] = 0; votes[1] = 0; votes[2] = 0; votes[3] = 0; votes[4] = 0;
-
-            if (n_class.index != -1) votes[n_class.index]++;
-            if (s_class.index != -1) votes[s_class.index]++;
-            if (e_class.index != -1) votes[e_class.index]++;
-            if (w_class.index != -1) votes[w_class.index]++;
-            
-            int max_votes = 0;
-            int majority_idx = -1;
-            for (int i = 0; i < 5; i++) {
-                if (votes[i] > max_votes) {
-                    max_votes = votes[i];
-                    majority_idx = i;
-                }
-            }
-
-            if (max_votes >= 2) { // Require at least 2 neighbors to agree
-                final_idx = majority_idx;
-            }
-        }
-
         vec3 colors[5];
         colors[0] = PALETTE_FACE;
         colors[1] = PALETTE_ARMOUR;
@@ -158,19 +101,33 @@ const fragmentShader = `
         targetColors[3] = uColorHair;
         targetColors[4] = uColorOutline;
 
+        // Convert texture color and palette colors to YUV for better color comparison
+        vec3 texColorYUV = rgb2yuv(texColor.rgb);
+        vec3 paletteYUVs[5];
+        paletteYUVs[0] = rgb2yuv(colors[0]);
+        paletteYUVs[1] = rgb2yuv(colors[1]);
+        paletteYUVs[2] = rgb2yuv(colors[2]);
+        paletteYUVs[3] = rgb2yuv(colors[3]);
+        paletteYUVs[4] = rgb2yuv(colors[4]);
+
         float dists[5];
-        dists[0] = distance(texColor.rgb, colors[0]);
-        dists[1] = distance(texColor.rgb, colors[1]);
-        dists[2] = distance(texColor.rgb, colors[2]);
-        dists[3] = distance(texColor.rgb, colors[3]);
-        dists[4] = distance(texColor.rgb, colors[4]);
+        dists[0] = distance(texColorYUV, paletteYUVs[0]);
+        dists[1] = distance(texColorYUV, paletteYUVs[1]);
+        dists[2] = distance(texColorYUV, paletteYUVs[2]);
+        dists[3] = distance(texColorYUV, paletteYUVs[3]);
+        dists[4] = distance(texColorYUV, paletteYUVs[4]);
         
         float min_dist = 10.0;
-        int min_idx = final_idx;
+        int min_idx = -1;
+
+        for (int i = 0; i < 5; i++) {
+            if (dists[i] < min_dist) {
+                min_dist = dists[i];
+                min_idx = i;
+            }
+        }
 
         if (min_idx != -1) {
-            min_dist = dists[min_idx];
-
             float threshold = 1.0;
             if(min_idx == 0) threshold = uThresholdFace;
             if(min_idx == 1) threshold = uThresholdArmour;
@@ -266,7 +223,6 @@ const shaderMaterial = new THREE.ShaderMaterial({
         uThresholdHair: { value: 1.0 },
         uThresholdOutline: { value: 1.0 },
         uCleanPixels: { value: true },
-        uAmbiguityThreshold: { value: 0.25 },
         // Lighting uniforms
         uLightPos: { value: new THREE.Vector3(0.5, 0.5, 0.5) },
         uLightColor: { value: new THREE.Color('#FFFFFF') },
@@ -337,15 +293,6 @@ for (const [id, uniformName] of Object.entries(thresholdMappings)) {
         }
     });
 }
-
-// Connect ambiguity slider
-const ambiguitySlider = document.getElementById('ambiguity-slider');
-const ambiguityValue = document.getElementById('ambiguity-value');
-ambiguitySlider.addEventListener('input', (event) => {
-    const threshold = parseFloat(event.target.value);
-    shaderMaterial.uniforms.uAmbiguityThreshold.value = threshold;
-    ambiguityValue.textContent = threshold.toFixed(2);
-});
 
 // Connect lighting controls
 const lightColorInput = document.getElementById('color-light');
