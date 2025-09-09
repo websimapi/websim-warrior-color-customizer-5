@@ -32,6 +32,7 @@ const fragmentShader = `
     uniform vec3 uLightColor;
     uniform vec3 uAmbientColor;
     uniform float uLightIntensity;
+    uniform float uSpecularIntensity;
 
     // Palette based on the new source image
     const vec3 PALETTE_FACE    = vec3(1.0, 1.0, 0.0); // Yellow
@@ -40,8 +41,16 @@ const fragmentShader = `
     const vec3 PALETTE_HAIR    = vec3(1.0, 0.0, 0.0); // Red
     const vec3 PALETTE_OUTLINE = vec3(0.0, 0.0, 0.0); // Black
 
-    float getAlpha(vec2 uv) {
-        return texture2D(uTexture, uv).a;
+    vec3 LUMINANCE_VECTOR = vec3(0.2126, 0.7152, 0.0722);
+
+    float getLuminance(vec3 color) {
+        return dot(color, LUMINANCE_VECTOR);
+    }
+
+    float getTextureLuminance(vec2 uv) {
+        vec4 color = texture2D(uTexture, uv);
+        if (color.a < 0.5) return 0.0;
+        return getLuminance(color.rgb);
     }
 
     void main() {
@@ -49,134 +58,25 @@ const fragmentShader = `
         vec4 texColor = texture2D(uTexture, vUv);
 
         if (uCleanPixels) {
-            // STEP 1: Perform a more aggressive morphological opening.
-            // This is two passes of erosion followed by two passes of dilation.
-            // It's effective at removing noise clusters up to 2x2 pixels.
-
-            // --- Pass 1: Erosion ---
-            float alpha1 = 1.0;
-            for (int i = -1; i <= 1; i++) {
-                for (int j = -1; j <= 1; j++) {
-                    if (getAlpha(vUv + onePixel * vec2(i, j)) < 0.5) {
-                        alpha1 = 0.0;
-                    }
-                }
-            }
-
-            // --- Pass 2: Erosion (on the result of Pass 1) ---
-            float alpha2 = 1.0;
-            if (alpha1 < 0.5) {
-                alpha2 = 0.0;
-            } else {
-                for (int i = -1; i <= 1; i++) {
-                    for (int j = -1; j <= 1; j++) {
-                        // Check if neighbor would have survived first erosion pass
-                        float neighborAlpha1 = 1.0;
-                        for(int ni = -1; ni <= 1; ni++) {
-                            for(int nj = -1; nj <= 1; nj++) {
-                                if(getAlpha(vUv + onePixel * vec2(i+ni, j+nj)) < 0.5) {
-                                    neighborAlpha1 = 0.0;
-                                }
-                            }
-                        }
-                        if (neighborAlpha1 < 0.5) {
-                            alpha2 = 0.0;
-                        }
-                    }
-                }
-            }
-
-            // --- Pass 3: Dilation (on the result of Pass 2) ---
-            float alpha3 = 0.0;
-            if(alpha2 > 0.5) {
-                alpha3 = 1.0;
-            } else {
-                for (int i = -1; i <= 1; i++) {
-                    for (int j = -1; j <= 1; j++) {
-                         // Check if neighbor would have survived second erosion pass
-                        vec2 neighborUv = vUv + onePixel * vec2(i, j);
-                        float n_alpha1 = 1.0;
-                        for(int ni = -1; ni <= 1; ni++) for(int nj = -1; nj <= 1; nj++) {
-                           if(getAlpha(neighborUv + onePixel * vec2(ni, nj)) < 0.5) n_alpha1 = 0.0;
-                        }
-
-                        if(n_alpha1 > 0.5) {
-                            float n_alpha2 = 1.0;
-                            for(int ni = -1; ni <= 1; ni++) for(int nj = -1; nj <= 1; nj++) {
-                                float nn_alpha1 = 1.0;
-                                for(int nni = -1; nni <= 1; nni++) for(int nnj = -1; nnj <= 1; nnj++) {
-                                    if(getAlpha(neighborUv + onePixel * vec2(ni+nni, nj+nnj)) < 0.5) nn_alpha1 = 0.0;
-                                }
-                                if(nn_alpha1 < 0.5) n_alpha2 = 0.0;
-                            }
-                            if(n_alpha2 > 0.5) alpha3 = 1.0;
-                        }
-                    }
-                }
-            }
-
-             // --- Pass 4: Dilation (on the result of Pass 3) ---
-            float finalAlpha = 0.0;
-            if(alpha3 > 0.5) {
-                finalAlpha = 1.0;
-            } else {
-                // This is the most complex part. We must check if any neighbor would have survived Pass 3.
-                // A full recalculation is too expensive. We can approximate by checking if any neighbor
-                // would have survived Pass 2, which is a strong indicator.
-                 for (int i = -1; i <= 1; i++) {
-                    for (int j = -1; j <= 1; j++) {
-                        vec2 neighborUv = vUv + onePixel * vec2(i, j);
-                        float n_alpha1 = 1.0;
-                        for(int ni = -1; ni <= 1; ni++) for(int nj = -1; nj <= 1; nj++) {
-                           if(getAlpha(neighborUv + onePixel * vec2(ni, nj)) < 0.5) n_alpha1 = 0.0;
-                        }
-                        if(n_alpha1 > 0.5) {
-                            float n_alpha2 = 1.0;
-                            for(int ni = -1; ni <= 1; ni++) for(int nj = -1; nj <= 1; nj++) {
-                                float nn_alpha1 = 1.0;
-                                for(int nni = -1; nni <= 1; nni++) for(int nnj = -1; nnj <= 1; nnj++) {
-                                    if(getAlpha(neighborUv + onePixel * vec2(ni+nni, nj+nnj)) < 0.5) nn_alpha1 = 0.0;
-                                }
-                                if(nn_alpha1 < 0.5) n_alpha2 = 0.0;
-                            }
-                            if(n_alpha2 > 0.5) finalAlpha = 1.0; // If neighbor survives double erosion, dilate.
-                        }
-                    }
-                }
-            }
-
-            // Apply the cleaned alpha mask
-            texColor.a = finalAlpha;
+            float alpha = texColor.a;
+            float n = texture2D(uTexture, vUv + vec2(0.0, onePixel.y)).a;
+            float s = texture2D(uTexture, vUv - vec2(0.0, onePixel.y)).a;
+            float e = texture2D(uTexture, vUv + vec2(onePixel.x, 0.0)).a;
+            float w = texture2D(uTexture, vUv - vec2(onePixel.x, 0.0)).a;
             
-            // STEP 2: Clean up internal stray pixels using the new clean mask
-            if (texColor.a > 0.5 && distance(texColor.rgb, PALETTE_OUTLINE) > 0.1) {
-                vec3 dominantColor = vec3(0.0);
-                float maxCount = 0.0;
-                vec3 totalColor = vec3(0.0);
-                float sampleCount = 0.0;
-                
-                // Find dominant color in 3x3 neighborhood to fill holes
-                 for (int i = -1; i <= 1; i++) {
-                    for (int j = -1; j <= 1; j++) {
-                        vec2 neighborUv = vUv + onePixel * vec2(float(i), float(j));
-                        vec4 neighborColor = texture2D(uTexture, neighborUv);
-                        if (neighborColor.a > 0.5) {
-                           totalColor += neighborColor.rgb;
-                           sampleCount += 1.0;
-                        }
-                    }
-                }
-                 // Only overwrite if a dominant color was found
-                if (sampleCount > 1.0) {
-                    texColor.rgb = totalColor / sampleCount;
-                }
+            if (alpha > 0.5 && n < 0.1 && s < 0.1 && e < 0.1 && w < 0.1) {
+                alpha = 0.0;
+            }
+
+            if (alpha < 0.1) {
+                discard;
+            }
+        } else {
+             if (texColor.a < 0.1) {
+                discard;
             }
         }
-
-        if (texColor.a < 0.1) {
-            discard;
-        }
-
+       
         vec3 finalColor = texColor.rgb;
 
         vec3 colors[5];
@@ -185,6 +85,13 @@ const fragmentShader = `
         colors[2] = PALETTE_TRIM;
         colors[3] = PALETTE_HAIR;
         colors[4] = PALETTE_OUTLINE;
+
+        vec3 targetColors[5];
+        targetColors[0] = uColorFace;
+        targetColors[1] = uColorArmour;
+        targetColors[2] = uColorTrim;
+        targetColors[3] = uColorHair;
+        targetColors[4] = uColorOutline;
 
         float dists[5];
         dists[0] = distance(texColor.rgb, colors[0]);
@@ -203,40 +110,60 @@ const fragmentShader = `
             }
         }
 
-        if (min_idx == 0) {
-            if (min_dist < uThresholdFace) finalColor = uColorFace;
-        } else if (min_idx == 1) {
-            if (min_dist < uThresholdArmour) finalColor = uColorArmour;
-        } else if (min_idx == 2) {
-            if (min_dist < uThresholdTrim) finalColor = uColorTrim;
-        } else if (min_idx == 3) {
-            if (min_dist < uThresholdHair) finalColor = uColorHair;
-        } else if (min_idx == 4) {
-            if (min_dist < uThresholdOutline) finalColor = uColorOutline;
+        if (min_idx != -1) {
+            float threshold = 1.0;
+            if(min_idx == 0) threshold = uThresholdFace;
+            if(min_idx == 1) threshold = uThresholdArmour;
+            if(min_idx == 2) threshold = uThresholdTrim;
+            if(min_idx == 3) threshold = uThresholdHair;
+            if(min_idx == 4) threshold = uThresholdOutline;
+
+            if (min_dist < threshold) {
+                vec3 paletteColor = colors[min_idx];
+                vec3 targetColor = targetColors[min_idx];
+                
+                float texLuminance = getLuminance(texColor.rgb);
+                float paletteLuminance = getLuminance(paletteColor);
+                
+                // Avoid division by zero for black outline
+                if (paletteLuminance < 0.001) {
+                    finalColor = targetColor * texLuminance;
+                } else {
+                    float luminanceRatio = texLuminance / paletteLuminance;
+                    finalColor = targetColor * luminanceRatio;
+                }
+            }
         }
 
-        // --- LIGHTING CALCULATION ---
+
+        // --- HD LIGHTING CALCULATION ---
         if (texColor.a > 0.5) {
-            // 1. Calculate Normal from Alpha channel (as a height map)
-            float alpha_l = getAlpha(vUv - vec2(onePixel.x, 0.0));
-            float alpha_r = getAlpha(vUv + vec2(onePixel.x, 0.0));
-            float alpha_b = getAlpha(vUv - vec2(0.0, onePixel.y));
-            float alpha_t = getAlpha(vUv + vec2(0.0, onePixel.y));
+            // 1. Calculate Normal from the texture's luminance (acts as a height map)
+            float lum_l = getTextureLuminance(vUv - vec2(onePixel.x, 0.0));
+            float lum_r = getTextureLuminance(vUv + vec2(onePixel.x, 0.0));
+            float lum_b = getTextureLuminance(vUv - vec2(0.0, onePixel.y));
+            float lum_t = getTextureLuminance(vUv + vec2(0.0, onePixel.y));
             
             // The Z component of the normal determines the "flatness" of the lighting effect.
-            // A smaller value makes the edges more pronounced.
-            vec3 normal = normalize(vec3(alpha_r - alpha_l, alpha_t - alpha_b, 0.1));
+            // A smaller value makes the effect more pronounced.
+            vec3 normal = normalize(vec3(lum_r - lum_l, lum_t - lum_b, 0.2));
 
-            // 2. Calculate light direction from the light position uniform
+            // 2. Calculate vectors for lighting
             vec3 pixelPos = vec3(vUv, 0.0);
             vec3 lightDir = normalize(uLightPos - pixelPos);
+            vec3 viewDir = vec3(0.0, 0.0, 1.0); // Orthographic camera looking down Z
+            vec3 reflectDir = reflect(-lightDir, normal);
 
             // 3. Calculate diffuse lighting
             float diff = max(dot(normal, lightDir), 0.0);
-            vec3 diffuse = diff * uLightColor * uLightIntensity;
+            vec3 diffuse = diff * uLightColor;
 
-            // 4. Combine with ambient light and apply to the final color
-            vec3 lighting = uAmbientColor + diffuse;
+            // 4. Calculate specular lighting (shininess)
+            float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32.0); // 32.0 is shininess
+            vec3 specular = uSpecularIntensity * spec * uLightColor;
+
+            // 5. Combine lighting components and apply to the final color
+            vec3 lighting = uAmbientColor + (diffuse * uLightIntensity) + specular;
             finalColor *= lighting;
         }
 
@@ -284,6 +211,7 @@ const shaderMaterial = new THREE.ShaderMaterial({
         uLightColor: { value: new THREE.Color('#FFFFFF') },
         uAmbientColor: { value: new THREE.Color('#555555') },
         uLightIntensity: { value: 1.0 },
+        uSpecularIntensity: { value: 0.5 },
     },
     vertexShader,
     fragmentShader,
@@ -368,6 +296,15 @@ lightIntensitySlider.addEventListener('input', (e) => {
     lightIntensityValue.textContent = intensity.toFixed(2);
 });
 
+const specularIntensitySlider = document.getElementById('specular-intensity-slider');
+const specularIntensityValue = document.getElementById('specular-intensity-value');
+specularIntensitySlider.addEventListener('input', (e) => {
+    const intensity = parseFloat(e.target.value);
+    shaderMaterial.uniforms.uSpecularIntensity.value = intensity;
+    specularIntensityValue.textContent = intensity.toFixed(2);
+});
+
+
 // Update light position with mouse movement
 container.addEventListener('mousemove', (event) => {
     const rect = container.getBoundingClientRect();
@@ -383,10 +320,20 @@ cleanPixelsToggle.addEventListener('change', (event) => {
     shaderMaterial.uniforms.uCleanPixels.value = event.target.checked;
 });
 
+// Set default color picker values to match base palette for a better starting point
+document.getElementById('color-face').value = '#FFFF00';
+document.getElementById('color-armour').value = '#0000FF';
+document.getElementById('color-trim').value = '#00FF00';
+document.getElementById('color-hair').value = '#FF0000';
+document.getElementById('color-outline').value = '#000000';
+
 // Remove old global slider logic if it's still there
 const oldSliderControl = document.querySelector('.slider-control');
-if (oldSliderControl && oldSliderControl.style.display !== 'none') {
-    oldSliderControl.style.display = 'none';
+if (oldSliderControl && oldSliderControl.style.display !== 'none' && !oldSliderControl.querySelector('#light-intensity-slider') && !oldSliderControl.querySelector('#specular-intensity-slider')) {
+    const label = oldSliderControl.querySelector('label');
+    if (label && label.htmlFor === 'threshold-slider') {
+         oldSliderControl.style.display = 'none';
+    }
 }
 
 // Animation loop
